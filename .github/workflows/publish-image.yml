@@ -40,6 +40,7 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Tag and publish image
+        id: publish
         env:
           TARGET_IMAGE: ghcr.io/${{ github.repository }}
         run: |
@@ -61,3 +62,18 @@ jobs:
             docker tag chadlands-static-collector:latest "$target:$tag"
             docker push "$target:$tag"
           done
+
+          echo "image=$target" >> "$GITHUB_OUTPUT"
+          echo "verify_tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull and run published image
+        env:
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}:${{ steps.publish.outputs.verify_tag }}
+        run: |
+          set -euo pipefail
+          docker image rm "$PUBLISHED_IMAGE"
+          docker pull "$PUBLISHED_IMAGE"
+          test "$(docker image inspect "$PUBLISHED_IMAGE" --format '{{.Config.User}}')" = "10001:10001"
+          mkdir -p ghcr-test-output
+          chmod 0777 ghcr-test-output
+          docker run --rm -v "$PWD/ghcr-test-output:/output" "$PUBLISHED_IMAGE"
