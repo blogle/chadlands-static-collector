@@ -1,0 +1,22 @@
+{
+  "name": "chadlands-static-collector",
+  "version": "0.1.0",
+  "description": "Experimental static HTML artifact collector for the Chadlands map and codex",
+  "type": "module",
+  "bin": {
+    "chadlands-static-collector": "src/cli.js"
+  },
+  "scripts": {
+    "collect": "node src/cli.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.0",
+    "prettier": "^3.6.2",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

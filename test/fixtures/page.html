@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Fixture Codex</title>
+    <meta name="description" content="A test document">
+    <style>.hidden { display: none; }</style>
+  </head>
+  <body>
+    <h1>Creatures of the North</h1>
+    <p>Travelers record unusual creatures beyond the ridge.</p>
+    <div hidden>This must not be visible.</div>
+    <h2 id="wolves">Glass Wolves</h2>
+    <ul><li>Fast</li><li>Quiet</li></ul>
+    <table><thead><tr><th>Name</th><th>Region</th></tr></thead><tbody><tr><td>Wolf</td><td>North</td></tr></tbody></table>
+    <a href="/codex/wolf">Read more</a>
+    <img src="/images/wolf.png" alt="A glass wolf">
+    <script>window.mapData = {"regions":[{"name":"North"}],"routes":[1,2]};</script>
+    <script type="application/json">{"locations":["ridge"]}</script>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
