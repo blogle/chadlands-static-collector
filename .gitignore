@@ -1,5 +1,8 @@
 node_modules/
 artifacts/
+artifacts-phase21*/
+artifacts-final*/
+ghcr-test-output/
 result
 result-*
 *.tgz

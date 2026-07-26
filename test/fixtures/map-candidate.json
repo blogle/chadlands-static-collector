@@ -1,0 +1,58 @@
+{
+  "img": {
+    "w": 1024,
+    "h": 768,
+    "palette": "muted"
+  },
+  "seat": {
+    "name": "Central Hold",
+    "kind": "seat of power",
+    "x": 500,
+    "y": 350,
+    "notes": ["Administrative center"],
+    "owner": "observed owner value"
+  },
+  "settlements": [
+    {
+      "name": "North Village",
+      "kind": "village",
+      "x": 420,
+      "y": 240,
+      "notes": ["Near the ridge"],
+      "unknownFlag": true
+    },
+    {
+      "name": "South Town",
+      "kind": "town",
+      "x": 510,
+      "y": 610,
+      "notes": "On the southern road"
+    }
+  ],
+  "markers": [
+    {
+      "id": "marker-source-1",
+      "name": "Observer",
+      "kind": "character",
+      "x": 505,
+      "y": 352,
+      "notes": ["At the seat"]
+    }
+  ],
+  "labels": [
+    {
+      "name": "Northern Ridge",
+      "x": 300,
+      "y": 100,
+      "rotation": 12
+    }
+  ],
+  "routes": [
+    {
+      "from": "Central Hold",
+      "to": "North Village",
+      "style": "dashed"
+    }
+  ],
+  "renderVersion": 3
+}

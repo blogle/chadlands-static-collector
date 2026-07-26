@@ -1,0 +1,63 @@
+name: Publish OCI Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
+
+      - name: Enable public Nix cache
+        uses: cachix/cachix-action@97e5ff84d02b3b4f9936339f767e17f03c9252ed # v16
+        with:
+          name: nix-community
+          skipPush: true
+
+      - name: Build Nix OCI image
+        run: nix build .#ociImage -o result-oci
+
+      - name: Load Nix OCI archive
+        run: docker load < result-oci
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Tag and publish image
+        env:
+          TARGET_IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          target="${TARGET_IMAGE,,}"
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          tags=("sha-${short_sha}")
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            tags+=("latest")
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            tags+=("$version" "${version#v}")
+          fi
+
+          for tag in "${tags[@]}"; do
+            docker tag chadlands-static-collector:latest "$target:$tag"
+            docker push "$target:$tag"
+          done

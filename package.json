@@ -13,6 +13,7 @@
   "dependencies": {
     "cheerio": "^1.1.0",
     "prettier": "^3.6.2",
+    "sharp": "^0.35.3",
     "turndown": "^7.2.0",
     "turndown-plugin-gfm": "^1.0.2"
   },
