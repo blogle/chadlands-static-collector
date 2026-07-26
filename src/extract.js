@@ -26,7 +26,7 @@ function cleanText(value) {
   return value.replace(/\u00a0/g, " ").replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function absoluteUrl(value, base) {
+export function absoluteUrl(value, base) {
   if (!value) return null;
   try {
     return new URL(value, base).href;
@@ -128,6 +128,52 @@ export function codexMarkdown(html) {
   const turndown = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
   turndown.use(gfm);
   return `${turndown.turndown($("body").html() || "").trim()}\n`;
+}
+
+// Ordered, de-duplicated list of absolute HTTP(S) codex image URLs. Embedded
+// `data:` URIs are handled separately by the caller and excluded here.
+export function codexImageUrls(html, baseUrl) {
+  const $ = cheerio.load(html);
+  const seen = new Set();
+  const urls = [];
+  $("img").each((_, element) => {
+    const original = $(element).attr("src");
+    if (!original || /^data:/i.test(original)) return;
+    const absolute = absoluteUrl(original, baseUrl);
+    if (!absolute || !/^https?:/i.test(absolute)) return;
+    if (!seen.has(absolute)) {
+      seen.add(absolute);
+      urls.push(absolute);
+    }
+  });
+  return urls;
+}
+
+// Rewrite Codex DOM references so generated Markdown points at materialized
+// local assets and the collected map note, while preserving raw.html verbatim.
+// srcMap maps an absolute image URL to a fetch entry (with outputFile). Images
+// that could not be materialized keep their absolute URL so the link still
+// resolves upstream. The map `../` link is rewritten to mapHref only when the
+// page is the Codex (caller controls mapHref depth).
+export function rewriteCodexReferences(html, baseUrl, srcMap, { imagePrefix, mapHref }) {
+  const $ = cheerio.load(html);
+  $("img").each((_, element) => {
+    const original = $(element).attr("src");
+    if (!original || /^data:/i.test(original)) return;
+    const absolute = absoluteUrl(original, baseUrl);
+    const entry = srcMap.get(absolute);
+    if (entry && entry.outputFile) {
+      $(element).attr("src", `${imagePrefix}/${entry.outputFile}`);
+    } else if (absolute && /^https?:/i.test(absolute)) {
+      $(element).attr("src", absolute);
+    }
+  });
+  if (mapHref) {
+    $('a[href="../"]').each((_, element) => {
+      $(element).attr("href", mapHref);
+    });
+  }
+  return $.html();
 }
 
 function formatList(title, values, render) {

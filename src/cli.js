@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unifiedDiff } from "./diff.js";
 import { buildMapAnnotation, renderAnnotatedPng } from "./annotate.js";
-import { codexMarkdown, extractDocument, extractJsonCandidates, findMapIdentifiers, mapMarkdown as inspectionMarkdown, prepareScripts, serializeCandidates, sha256 } from "./extract.js";
+import { absoluteUrl, codexImageUrls, codexMarkdown, extractDocument, extractJsonCandidates, findMapIdentifiers, mapMarkdown as inspectionMarkdown, prepareScripts, rewriteCodexReferences, serializeCandidates, sha256 } from "./extract.js";
 import { diffCodexStructures, fragmentCodex } from "./fragments.js";
 import { captureIdentity, discoverPreviousCapture } from "./history.js";
 import { diffMaps, mapMarkdown, normalizeMap } from "./map.js";
@@ -73,6 +73,52 @@ async function fetchPage(name, url) {
   return { name, url: response.url, requestedUrl: url, response, body, html: body.toString("utf8"), sha256: sha256(body) };
 }
 
+const IMAGE_EXTENSION = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif", "image/svg+xml": "svg", "image/webp": "webp" };
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+// Fetch every HTTP(S) Codex image once, in source order, with content-type and
+// size validation. Successful downloads are returned with their bytes so the
+// caller writes them under codex/images/. Failures keep the absolute URL so
+// generated Markdown still resolves upstream. The returned digest lets the
+// unchanged check detect image-only updates.
+async function fetchCodexImages(page) {
+  const urls = codexImageUrls(page.html, page.url);
+  const entries = [];
+  for (let index = 0; index < urls.length; index += 1) {
+    const originalUrl = urls[index];
+    try {
+      const response = await fetch(originalUrl, { headers: { "user-agent": `chadlands-static-collector/${packageJson.version}` }, redirect: "follow" });
+      if (!response.ok) {
+        entries.push({ originalUrl, sourceOrder: index + 1, status: "failed", httpStatus: response.status, outputFile: null });
+        continue;
+      }
+      const contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.length) {
+        entries.push({ originalUrl, sourceOrder: index + 1, status: "failed", httpStatus: response.status, contentType, reason: "empty body", outputFile: null });
+        continue;
+      }
+      if (bytes.length > MAX_IMAGE_BYTES) {
+        entries.push({ originalUrl, sourceOrder: index + 1, status: "failed", httpStatus: response.status, contentType, reason: `exceeds ${MAX_IMAGE_BYTES} bytes`, byteLength: bytes.length, outputFile: null });
+        continue;
+      }
+      if (!contentType || !/^image\//i.test(contentType)) {
+        entries.push({ originalUrl, sourceOrder: index + 1, status: "failed", httpStatus: response.status, contentType, reason: "non-image content-type", byteLength: bytes.length, outputFile: null });
+        continue;
+      }
+      const extension = IMAGE_EXTENSION[contentType] || "bin";
+      const outputFile = `${String(index + 1).padStart(3, "0")}.${extension}`;
+      entries.push({ originalUrl, sourceOrder: index + 1, status: "ok", httpStatus: response.status, contentType, byteLength: bytes.length, sha256: sha256(bytes), outputFile, bytes });
+    } catch (error) {
+      entries.push({ originalUrl, sourceOrder: index + 1, status: "failed", error: error.message, outputFile: null });
+    }
+  }
+  const srcMap = new Map(entries.filter((entry) => entry.status === "ok").map((entry) => [entry.originalUrl, entry]));
+  const digest = sha256(entries.map((entry) => `${entry.originalUrl}\0${entry.status}\0${entry.sha256 || ""}`).join("\n"));
+  const materialized = entries.filter((entry) => entry.status === "ok").length;
+  return { entries, srcMap, digest, materialized };
+}
+
 async function writePage(page, captureDirectory, context) {
   const directory = join(captureDirectory, page.name);
   const scriptsDirectory = join(directory, "scripts");
@@ -114,9 +160,41 @@ async function writePage(page, captureDirectory, context) {
   await writeFile(join(directory, "document.txt"), `${document.visibleText}\n`);
 
   if (page.name === "codex") {
-    const markdown = codexMarkdown(page.html);
+    // Materialize HTTP(S) Codex images so generated Markdown references local
+    // files instead of dangling source-relative URLs. Raw HTML stays verbatim.
+    const codexImages = context.codexImages || { entries: [], srcMap: new Map(), digest: null, materialized: 0 };
+    if (codexImages.materialized) {
+      const imagesDirectory = join(directory, "images");
+      await mkdir(imagesDirectory, { recursive: true });
+      await Promise.all(codexImages.entries.filter((entry) => entry.status === "ok").map((entry) => writeFile(join(imagesDirectory, entry.outputFile), entry.bytes)));
+    }
+    for (const image of document.images) {
+      if (!image.originalSrc || /^data:/i.test(image.originalSrc)) continue;
+      const absolute = absoluteUrl(image.originalSrc, page.url);
+      const entry = codexImages.srcMap.get(absolute);
+      if (entry) {
+        image.materialized = entry.status === "ok";
+        image.outputFile = entry.outputFile;
+        image.byteLength = entry.byteLength;
+        image.sha256 = entry.sha256;
+        image.contentType = entry.contentType;
+        image.fetchStatus = entry.status;
+        image.httpStatus = entry.httpStatus;
+        image.fetchError = entry.error || entry.reason || null;
+      } else {
+        image.materialized = false;
+        image.fetchStatus = "not-attempted";
+      }
+    }
+
+    // Rewrite references for each depth: document.md lives in codex/, fragments
+    // live in codex/fragments/. The collected map note is a sibling at map/map.md.
+    const documentHtml = rewriteCodexReferences(page.html, page.url, codexImages.srcMap, { imagePrefix: "images", mapHref: "../map/map.md" });
+    const fragmentsHtml = rewriteCodexReferences(page.html, page.url, codexImages.srcMap, { imagePrefix: "../images", mapHref: "../../map/map.md" });
+
+    const markdown = codexMarkdown(documentHtml);
     await writeFile(join(directory, "document.md"), markdown);
-    const fragmented = fragmentCodex(page.html, {
+    const fragmented = fragmentCodex(fragmentsHtml, {
       captureId: context.captureId,
       captureDate: context.captureDate,
       targetCharacters: context.fragmentTarget,
@@ -147,6 +225,10 @@ async function writePage(page, captureDirectory, context) {
       splitLists: fragmented.structure.fragmentation.splitLists,
       listChunks: fragmented.structure.fragmentation.listChunks,
       listSourceItems: fragmented.structure.fragmentation.listSourceItems,
+      imageCount: codexImages.materialized,
+      imageFailedCount: codexImages.entries.filter((entry) => entry.status === "failed").length,
+      imageDigest: codexImages.digest,
+      images: codexImages.entries.map(({ bytes, ...entry }) => entry),
     };
   }
 
@@ -223,6 +305,9 @@ async function writeDiff(captureDirectory, currentManifest, currentStats, previo
         rawChanged: !previous || currentManifest.pages.codex.sha256 !== previous.manifest.pages.codex.sha256,
         textChanged: !previous || codexTextChanged,
         structureChanged: !previous || codexStructureChanged,
+        imagesChanged: !previous || currentManifest.pages.codex.imageDigest !== (previous.manifest.pages.codex?.imageDigest ?? undefined),
+        imageCount: currentManifest.pages.codex.imageCount ?? 0,
+        imageFailedCount: currentManifest.pages.codex.imageFailedCount ?? 0,
       },
       map: {
         rawChanged: !previous || currentManifest.pages.map.sha256 !== previous.manifest.pages.map.sha256,
@@ -275,13 +360,19 @@ export async function collect(options) {
   let codex;
   try {
     [map, codex] = await Promise.all([fetchPage("map", options.mapUrl), fetchPage("codex", options.codexUrl)]);
-    if (previous && map.sha256 === previous.manifest.pages.map.sha256 && codex.sha256 === previous.manifest.pages.codex.sha256) {
+    // Fetch Codex images up front so image-only updates are detected even when
+    // the raw HTML is unchanged, and so writePage can reuse the bytes.
+    const codexImages = await fetchCodexImages(codex);
+    const previousImageDigest = previous?.manifest?.pages?.codex?.imageDigest;
+    const imageUnchanged = previousImageDigest !== undefined && codexImages.digest === previousImageDigest;
+    if (previous && map.sha256 === previous.manifest.pages.map.sha256 && codex.sha256 === previous.manifest.pages.codex.sha256 && imageUnchanged) {
       await appendFetch(output, {
         attemptedAt: identity.attemptedAt,
         captureId: identity.captureId,
         status: "unchanged",
         mapSha256: map.sha256,
         codexSha256: codex.sha256,
+        codexImageDigest: codexImages.digest,
         previousCaptureId: previous.captureId,
       });
       return { status: "unchanged", captureId: identity.captureId, previousCaptureId: previous.captureId, manifest: previous.manifest, captureDirectory: previous.path, current: join(output, "current") };
@@ -296,6 +387,7 @@ export async function collect(options) {
       fragmentTarget: options.fragmentTarget ?? 6000,
       fragmentMax: options.fragmentMax ?? 10000,
       fragmentMin: options.fragmentMin ?? 800,
+      codexImages,
     };
     const stats = {};
     for (const page of [map, codex]) stats[page.name] = await writePage(page, captureDirectory, context);
@@ -321,6 +413,12 @@ export async function collect(options) {
         artifactDirectory: page.name,
         inlineScriptCount: stats[page.name].scriptCount,
         jsonCandidateCount: stats[page.name].candidateCount,
+        ...(page.name === "codex" ? {
+          imageCount: stats.codex.imageCount ?? 0,
+          imageFailedCount: stats.codex.imageFailedCount ?? 0,
+          imageDigest: stats.codex.imageDigest ?? null,
+          images: stats.codex.images ?? [],
+        } : {}),
       }])),
       artifacts: {
         codexFragments: stats.codex.fragmentCount,
