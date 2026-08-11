@@ -53,6 +53,24 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function writeUnderdarkLayer(layer, mapDirectory, context) {
+  if (!layer || typeof layer !== "object") return null;
+  const directory = join(mapDirectory, "underdark");
+  await mkdir(directory, { recursive: true });
+  await writeJson(join(directory, "source.json"), layer);
+  const imageMatch = typeof layer.img === "string" && layer.img.match(/^data:([^;,]+)?;base64,(.*)$/s);
+  if (!imageMatch) return { layer: layer.layer ?? null, imageCount: 0, dotCount: layer.dots?.length || 0 };
+  const image = Buffer.from(imageMatch[2], "base64");
+  await writeFile(join(directory, "overview.png"), image);
+  const candidate = { markers: layer.dots || [], img: { layer: layer.layer ?? null } };
+  const normalized = normalizeMap(candidate, { captureId: context.captureId, imageSha256: sha256(image), sourceCandidatePath: "source.json" });
+  await writeJson(join(directory, "normalized.json"), normalized);
+  await writeJson(join(directory, "markers.json"), normalized.markers);
+  await writeJson(join(directory, "validation.json"), normalized.validation);
+  await writeFile(join(directory, "map.md"), mapMarkdown(normalized, "source.json"));
+  return { layer: layer.layer ?? null, imageCount: 1, imageSha256: sha256(image), dotCount: layer.dots?.length || 0 };
+}
+
 async function readJson(path, fallback) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -120,7 +138,7 @@ async function fetchCodexImages(page) {
 }
 
 async function writePage(page, captureDirectory, context) {
-  const directory = join(captureDirectory, page.name);
+  const directory = join(captureDirectory, page.directory || page.name);
   const scriptsDirectory = join(directory, "scripts");
   await mkdir(scriptsDirectory, { recursive: true });
   await writeFile(join(directory, "raw.html"), page.body);
@@ -271,6 +289,7 @@ async function writePage(page, captureDirectory, context) {
   await writeJson(join(directory, "legend.json"), annotation.legend);
   await writeJson(join(directory, "validation.json"), normalized.validation);
   await writeFile(join(directory, "map.md"), mapMarkdown(normalized, candidatePath || "source-candidate.json"));
+  const underdark = await writeUnderdarkLayer(sourceCandidate?.underdark, directory, context);
   return {
     scriptCount: preparedScripts.files.length,
     candidateCount: serialized.index.length,
@@ -282,6 +301,7 @@ async function writePage(page, captureDirectory, context) {
       labels: normalized.labels.length,
       unclassified: normalized.validation.unclassifiedRecords,
     },
+    underdark,
   };
 }
 
@@ -360,6 +380,7 @@ export async function collect(options) {
   let codex;
   try {
     [map, codex] = await Promise.all([fetchPage("map", options.mapUrl), fetchPage("codex", options.codexUrl)]);
+    map.directory = "map";
     // Fetch Codex images up front so image-only updates are detected even when
     // the raw HTML is unchanged, and so writePage can reuse the bytes.
     const codexImages = await fetchCodexImages(codex);
@@ -410,7 +431,7 @@ export async function collect(options) {
         sha256: page.sha256,
         etag: page.response.headers.get("etag"),
         lastModified: page.response.headers.get("last-modified"),
-        artifactDirectory: page.name,
+        artifactDirectory: page.directory || page.name,
         inlineScriptCount: stats[page.name].scriptCount,
         jsonCandidateCount: stats[page.name].candidateCount,
         ...(page.name === "codex" ? {
@@ -432,6 +453,7 @@ export async function collect(options) {
         listChunks: stats.codex.listChunks,
         listSourceItems: stats.codex.listSourceItems,
         mapRecords: stats.map.recordCounts,
+        underdark: stats.map.underdark || null,
         mapAnnotation: {
           rendered: stats.map.annotation.validation.renderedRecordCount,
           skipped: stats.map.annotation.validation.skippedRecordCount,

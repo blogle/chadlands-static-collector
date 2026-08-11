@@ -56,6 +56,8 @@ artifacts/
 
 `current/` is a copy of the latest successful capture. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`.
 
+When present, the map page's embedded `mapdata.underdark` payload is extracted automatically into `map/underdark/`, including its base64 PNG, layer metadata, dots, normalized records, and Markdown note. No second endpoint or flag is required.
+
 Every attempt appends a compact `captured`, `unchanged`, or `failed` event to `fetches.jsonl` where practical. If both fetched source hashes match the latest successful capture, the command exits successfully without creating a duplicate capture or replacing `current/`.
 
 ## Capture Artifacts
