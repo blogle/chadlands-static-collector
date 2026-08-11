@@ -9,6 +9,7 @@ import { absoluteUrl, codexImageUrls, codexMarkdown, extractDocument, extractJso
 import { diffCodexStructures, fragmentCodex } from "./fragments.js";
 import { captureIdentity, discoverPreviousCapture } from "./history.js";
 import { diffMaps, mapMarkdown, normalizeMap } from "./map.js";
+import { deduplicateVault } from "./storage.js";
 
 const DEFAULT_MAP_URL = "https://mud.3zr4.com/maps/dv6uOmmTkKxKVJmmSU-tGA/";
 const DEFAULT_CODEX_URL = "https://mud.3zr4.com/maps/dv6uOmmTkKxKVJmmSU-tGA/codex/";
@@ -467,6 +468,8 @@ export async function collect(options) {
     const current = join(output, "current");
     await rm(current, { recursive: true, force: true });
     await cp(captureDirectory, current, { recursive: true });
+    const storage = await deduplicateVault(output);
+    await writeJson(join(output, "storage.json"), { ...storage, deduplicatedAt: new Date().toISOString() });
     await appendFetch(output, {
       attemptedAt: identity.attemptedAt,
       captureId: identity.captureId,
@@ -475,7 +478,7 @@ export async function collect(options) {
       codexSha256: codex.sha256,
       previousCaptureId: previous?.captureId || null,
     });
-    return { status: "captured", captureId: identity.captureId, previousCaptureId: previous?.captureId || null, manifest, captureDirectory, current, stats, diff };
+    return { status: "captured", captureId: identity.captureId, previousCaptureId: previous?.captureId || null, manifest, captureDirectory, current, stats, diff, storage };
   } catch (error) {
     try {
       await appendFetch(output, {

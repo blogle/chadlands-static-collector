@@ -8,6 +8,7 @@ import { collect } from "../src/cli.js";
 import { fragmentCodex } from "../src/fragments.js";
 import { discoverPreviousCapture, discoverSuccessfulCaptures } from "../src/history.js";
 import { diffMaps, normalizeMap } from "../src/map.js";
+import { deduplicateVault } from "../src/storage.js";
 
 const mapCandidate = JSON.parse(await readFile(new URL("./fixtures/map-candidate.json", import.meta.url), "utf8"));
 
@@ -70,6 +71,21 @@ test("normalizes observed map records without dropping unknown fields", () => {
   assert.ok(normalized.unclassified.some(({ collection }) => collection === "routes"));
   assert.ok(normalized.unclassified.some(({ field }) => field === "renderVersion"));
   assert.equal(normalized.validation.omittedSourceRecords, 0);
+});
+
+test("deduplicates identical vault files without changing their paths", async () => {
+  const output = await mkdtemp(join(tmpdir(), "collector-dedupe-"));
+  const first = join(output, "captures", "one.txt");
+  const second = join(output, "current", "two.txt");
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(join(output, "captures"), { recursive: true });
+  await mkdir(join(output, "current"), { recursive: true });
+  await writeFile(first, "same content\n");
+  await writeFile(second, "same content\n");
+  const result = await deduplicateVault(output);
+  assert.equal(result.deduplicatedFiles, 1);
+  assert.equal((await stat(first)).ino, (await stat(second)).ino);
+  assert.equal(await readFile(second, "utf8"), "same content\n");
 });
 
 test("map IDs are stable across movement and movement is reported", () => {

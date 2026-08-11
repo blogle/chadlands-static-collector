@@ -51,10 +51,13 @@ artifacts/
 │           ├── map/
 │           └── diff/
 ├── current/
+├── storage.json
 └── fetches.jsonl
 ```
 
 `current/` is a copy of the latest successful capture. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`.
+
+After each successful capture, byte-identical files across captures and `current/` are hard-linked. This preserves every vault path and its exact bytes while sharing the underlying storage; `storage.json` records the files and bytes saved.
 
 When present, the map page's embedded `mapdata.underdark` payload is extracted automatically into `map/underdark/`, including its base64 PNG, layer metadata, dots, normalized records, and Markdown note. No second endpoint or flag is required.
 
