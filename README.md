@@ -37,6 +37,22 @@ npm run collect -- \
 
 The process exits nonzero on an HTTP error, empty response, extraction error, or artifact write failure.
 
+## Historical Codex Migration
+
+Existing full historical captures are never migrated during ordinary collection. Preview the explicit migration first:
+
+```bash
+npm run collect -- --output ./artifacts --migrate-codex-snapshots
+```
+
+The command is dry-run by default and prints a JSON report. Apply only after reviewing it:
+
+```bash
+npm run collect -- --output ./artifacts --migrate-codex-snapshots --apply
+```
+
+It processes successful captures chronologically, preserves non-Codex evidence, converts captures to sparse direct-link Codex storage, removes legacy `aggregate.md` and `codex/document.txt`, and atomically rebuilds a fully materialized `current/`. `--apply` requires the migration flag. A second run is idempotent.
+
 ## Capture History
 
 Successful captures are partitioned by UTC date. Multiple changed captures on one date are retained:
@@ -54,7 +70,7 @@ artifacts/
 └── fetches.jsonl
 ```
 
-Capture directories are immutable after publication. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`. A later collection never rewrites an earlier capture.
+Capture directories are immutable during ordinary collection. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`. The explicit one-time migration above is the sole historical rewrite path.
 
 Historical Codex captures are sparse. Their `document.md` is the human-facing composite, and their `fragments/` directory contains only fragments first materialized or changed in that capture. Composite and parent-fragment transclusions point directly to the most recent materialized fragment; no inheritance stubs or pointer chains are created.
 

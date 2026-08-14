@@ -8,6 +8,7 @@ import { buildMapAnnotation, renderAnnotatedPng } from "./annotate.js";
 import { absoluteUrl, codexImageUrls, codexMarkdown, extractDocument, extractJsonCandidates, findMapIdentifiers, mapMarkdown as inspectionMarkdown, prepareScripts, rewriteCodexReferences, serializeCandidates, sha256 } from "./extract.js";
 import { diffCodexStructures, fragmentCodex } from "./fragments.js";
 import { materializeCurrentCodex, writeSparseCodex } from "./codex.js";
+import { migrateCodexSnapshots } from "./migrate.js";
 import { captureIdentity, discoverPreviousCapture } from "./history.js";
 import { diffMaps, mapMarkdown, normalizeMap } from "./map.js";
 
@@ -16,7 +17,7 @@ const DEFAULT_CODEX_URL = "https://mud.3zr4.com/maps/dv6uOmmTkKxKVJmmSU-tGA/code
 const packageJson = JSON.parse(await readFile(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"));
 
 function usage() {
-  return `Usage: chadlands-static-collector [options]\n\nOptions:\n  --output <directory>      Output root (default: /output in OCI, otherwise ./artifacts)\n  --map-url <url>           Override the map URL\n  --codex-url <url>         Override the codex URL\n  --fragment-target <chars> Preferred fragment size (default: 6000)\n  --fragment-max <chars>    Maximum fragment size at block boundaries (default: 10000)\n  --fragment-min <chars>    Minimum preferred fragment size (default: 800)\n  --help                    Show this help\n`;
+  return `Usage: chadlands-static-collector [options]\n\nOptions:\n  --output <directory>      Output root (default: /output in OCI, otherwise ./artifacts)\n  --map-url <url>           Override the map URL\n  --codex-url <url>         Override the codex URL\n  --fragment-target <chars> Preferred fragment size (default: 6000)\n  --fragment-max <chars>    Maximum fragment size at block boundaries (default: 10000)\n  --fragment-min <chars>    Minimum preferred fragment size (default: 800)\n  --migrate-codex-snapshots Migrate existing captures only (dry-run by default)\n  --apply                   Apply a migration (requires --migrate-codex-snapshots)\n  --help                    Show this help\n`;
 }
 
 export function parseArgs(argv, env = process.env) {
@@ -27,6 +28,8 @@ export function parseArgs(argv, env = process.env) {
     fragmentTarget: 6000,
     fragmentMax: 10000,
     fragmentMin: 800,
+    migrateCodexSnapshots: false,
+    apply: false,
   };
   const keys = {
     "--output": "output",
@@ -39,6 +42,8 @@ export function parseArgs(argv, env = process.env) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") return { ...options, help: true };
+    if (argument === "--migrate-codex-snapshots") { options.migrateCodexSnapshots = true; continue; }
+    if (argument === "--apply") { options.apply = true; continue; }
     const key = keys[argument];
     if (!key || !argv[index + 1]) throw new Error(`Unknown or incomplete argument: ${argument}`);
     options[key] = key.startsWith("fragment") ? Number(argv[++index]) : argv[++index];
@@ -47,6 +52,7 @@ export function parseArgs(argv, env = process.env) {
     if (!Number.isInteger(options[key]) || options[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (options.fragmentMin > options.fragmentMax) throw new Error("fragmentMin cannot exceed fragmentMax");
+  if (options.apply && !options.migrateCodexSnapshots) throw new Error("--apply requires --migrate-codex-snapshots");
   return options;
 }
 
@@ -543,6 +549,12 @@ async function main() {
     const options = parseArgs(process.argv.slice(2));
     if (options.help) {
       process.stdout.write(usage());
+      return;
+    }
+    if (options.migrateCodexSnapshots) {
+      const report = await migrateCodexSnapshots(options);
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      if (report.errors.length) process.exitCode = 1;
       return;
     }
     const result = await collect(options);
