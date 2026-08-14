@@ -123,7 +123,7 @@ async function installDirectory(source, target) {
   const temporary = `${target}.migration-${process.pid}.tmp`;
   const backup = `${target}.migration-${process.pid}.old`;
   await rm(temporary, { recursive: true, force: true }); await rm(backup, { recursive: true, force: true });
-  await rename(source, temporary);
+  await cp(source, temporary, { recursive: true });
   try {
     try { await rename(target, backup); } catch (error) { if (error.code !== "ENOENT") throw error; }
     await rename(temporary, target); await rm(backup, { recursive: true, force: true });
