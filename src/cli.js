@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { appendFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { appendFile, cp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unifiedDiff } from "./diff.js";
 import { buildMapAnnotation, renderAnnotatedPng } from "./annotate.js";
 import { absoluteUrl, codexImageUrls, codexMarkdown, extractDocument, extractJsonCandidates, findMapIdentifiers, mapMarkdown as inspectionMarkdown, prepareScripts, rewriteCodexReferences, serializeCandidates, sha256 } from "./extract.js";
 import { diffCodexStructures, fragmentCodex } from "./fragments.js";
+import { materializeCurrentCodex, writeSparseCodex } from "./codex.js";
 import { captureIdentity, discoverPreviousCapture } from "./history.js";
 import { diffMaps, mapMarkdown, normalizeMap } from "./map.js";
-import { deduplicateVault } from "./storage.js";
 
 const DEFAULT_MAP_URL = "https://mud.3zr4.com/maps/dv6uOmmTkKxKVJmmSU-tGA/";
 const DEFAULT_CODEX_URL = "https://mud.3zr4.com/maps/dv6uOmmTkKxKVJmmSU-tGA/codex/";
@@ -84,6 +84,36 @@ async function appendFetch(output, record) {
   await appendFile(join(output, "fetches.jsonl"), `${JSON.stringify(record)}\n`);
 }
 
+async function requireManagedDirectory(root, path) {
+  const [actualRoot, actualPath] = await Promise.all([realpath(root), realpath(path)]);
+  const relation = relative(actualRoot, actualPath);
+  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) throw new Error(`Managed output path escapes output root: ${path}`);
+}
+
+async function publishCurrent(output, captureDirectory) {
+  const current = join(output, "current");
+  const staging = join(output, `.current-${Date.now()}-${process.pid}.tmp`);
+  const backup = join(output, `.current-${Date.now()}-${process.pid}.previous`);
+  await rm(staging, { recursive: true, force: true });
+  await rm(backup, { recursive: true, force: true });
+  await cp(captureDirectory, staging, { recursive: true });
+  await materializeCurrentCodex(staging, captureDirectory, output);
+  let backedUp = false;
+  try {
+    try { await rename(current, backup); backedUp = true; } catch (error) { if (error.code !== "ENOENT") throw error; }
+    await rename(staging, current);
+    await rm(backup, { recursive: true, force: true });
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    if (backedUp) {
+      await rm(current, { recursive: true, force: true });
+      await rename(backup, current);
+    }
+    throw error;
+  }
+  return current;
+}
+
 async function fetchPage(name, url) {
   const response = await fetch(url, { headers: { "user-agent": `chadlands-static-collector/${packageJson.version}` }, redirect: "follow" });
   if (!response.ok) throw new Error(`${name} fetch failed: HTTP ${response.status} ${response.statusText}`);
@@ -133,7 +163,7 @@ async function fetchCodexImages(page) {
     }
   }
   const srcMap = new Map(entries.filter((entry) => entry.status === "ok").map((entry) => [entry.originalUrl, entry]));
-  const digest = sha256(entries.map((entry) => `${entry.originalUrl}\0${entry.status}\0${entry.sha256 || ""}`).join("\n"));
+  const digest = sha256(entries.map((entry) => `${entry.originalUrl}\0${entry.status}\0${entry.sha256 || ""}\0${entry.httpStatus || ""}\0${entry.contentType || ""}\0${entry.byteLength || ""}\0${entry.reason || ""}\0${entry.error || ""}`).join("\n"));
   const materialized = entries.filter((entry) => entry.status === "ok").length;
   return { entries, srcMap, digest, materialized };
 }
@@ -176,8 +206,6 @@ async function writePage(page, captureDirectory, context) {
   document.scripts = preparedScripts.index;
   await Promise.all(preparedScripts.files.map(({ outputFile, content }) => writeFile(join(scriptsDirectory, outputFile), content)));
   await writeJson(join(scriptsDirectory, "index.json"), preparedScripts.index);
-  await writeFile(join(directory, "document.txt"), `${document.visibleText}\n`);
-
   if (page.name === "codex") {
     // Materialize HTTP(S) Codex images so generated Markdown references local
     // files instead of dangling source-relative URLs. Raw HTML stays verbatim.
@@ -212,7 +240,6 @@ async function writePage(page, captureDirectory, context) {
     const fragmentsHtml = rewriteCodexReferences(page.html, page.url, codexImages.srcMap, { imagePrefix: "../images", mapHref: "../../map/map.md" });
 
     const markdown = codexMarkdown(documentHtml);
-    await writeFile(join(directory, "document.md"), markdown);
     const fragmented = fragmentCodex(fragmentsHtml, {
       captureId: context.captureId,
       captureDate: context.captureDate,
@@ -222,20 +249,18 @@ async function writePage(page, captureDirectory, context) {
       maximumHeadingDepth: 4,
     });
     await mkdir(join(directory, "fragments"), { recursive: true });
-    await Promise.all(Object.entries(fragmented.files).map(([file, content]) => writeFile(join(directory, file), content)));
-    await writeFile(join(directory, "aggregate.md"), fragmented.aggregate);
-    await writeJson(join(directory, "structure.json"), fragmented.structure);
     await writeJson(join(directory, "document.json"), document);
     const sizes = fragmented.structure.fragments.map((fragment) => fragment.characterCount);
     return {
       scriptCount: preparedScripts.files.length,
       candidateCount: 0,
       markdown,
+      visibleText: document.visibleText,
       structure: fragmented.structure,
+      fragmentedFiles: fragmented.files,
       fragmentCount: sizes.length,
       smallestFragment: sizes.length ? Math.min(...sizes) : 0,
       largestFragment: sizes.length ? Math.max(...sizes) : 0,
-      aggregateCount: fragmented.structure.fragments.filter(({ kind }) => kind === "aggregate").length,
       leafCount: fragmented.structure.fragments.filter(({ kind }) => kind === "leaf").length,
       oversizedTables: fragmented.structure.fragmentation.oversizedTables,
       splitTables: fragmented.structure.fragmentation.splitTables,
@@ -250,6 +275,8 @@ async function writePage(page, captureDirectory, context) {
       images: codexImages.entries.map(({ bytes, ...entry }) => entry),
     };
   }
+
+  await writeFile(join(directory, "document.txt"), `${document.visibleText}\n`);
 
   const candidatesDirectory = join(directory, "json-candidates");
   await mkdir(candidatesDirectory, { recursive: true });
@@ -311,10 +338,10 @@ async function writeDiff(captureDirectory, currentManifest, currentStats, previo
   await mkdir(directory, { recursive: true });
   const previousCodexStructure = previous ? await readJson(join(previous.path, "codex", "structure.json"), { fragments: [] }) : { fragments: [] };
   const previousMap = previous ? await readJson(join(previous.path, "map", "normalized.json"), {}) : {};
-  const previousCodexMarkdown = previous ? await readFile(join(previous.path, "codex", "document.md"), "utf8").catch(() => "") : "";
+  const previousCodexText = previous ? (await readJson(join(previous.path, "codex", "document.json"), {})).visibleText || "" : "";
   const codex = diffCodexStructures(currentStats.codex.structure, previousCodexStructure);
   const map = diffMaps(currentStats.map.normalized, previousMap);
-  const codexTextChanged = currentStats.codex.markdown !== previousCodexMarkdown;
+  const codexTextChanged = currentStats.codex.visibleText !== previousCodexText;
   const codexStructureChanged = codex.added.length + codex.removed.length + codex.changed.length + codex.headingChanges.length + codex.parentChanges.length > 0;
   const mapDataChanged = map.added.length + map.removed.length + map.changed.length > 0 || map.seatChanged || map.unclassified !== null;
   const manifest = {
@@ -362,7 +389,7 @@ async function writeDiff(captureDirectory, currentManifest, currentStats, previo
   ].join("\n") : `# Capture Diff\n\nCurrent capture: \`${currentManifest.captureId}\`\n\nNo previous successful capture exists.\n`;
   await writeFile(join(directory, "summary.md"), `${summary.trim()}\n`);
   await writeJson(join(directory, "manifest.json"), manifest);
-  await writeFile(join(directory, "codex-text.patch"), previous ? unifiedDiff(previousCodexMarkdown, currentStats.codex.markdown, `${previous.captureId}/codex/document.md`, `${currentManifest.captureId}/codex/document.md`) : "");
+  await writeFile(join(directory, "codex-text.patch"), previous ? unifiedDiff(previousCodexText, currentStats.codex.visibleText, `${previous.captureId}/codex/visible-text`, `${currentManifest.captureId}/codex/visible-text`) : "");
   await writeJson(join(directory, "codex-structure.json"), codex);
   await writeJson(join(directory, "map-structure.json"), map);
   await writeJson(join(directory, "raw-hashes.json"), {
@@ -376,6 +403,9 @@ export async function collect(options) {
   const identity = captureIdentity(options.now || new Date());
   const output = resolve(options.output);
   await mkdir(output, { recursive: true });
+  const capturesRoot = join(output, "captures");
+  await mkdir(capturesRoot, { recursive: true });
+  await requireManagedDirectory(output, capturesRoot);
   const previous = await discoverPreviousCapture(output, identity.attemptedAt);
   let map;
   let codex;
@@ -388,6 +418,7 @@ export async function collect(options) {
     const previousImageDigest = previous?.manifest?.pages?.codex?.imageDigest;
     const imageUnchanged = previousImageDigest !== undefined && codexImages.digest === previousImageDigest;
     if (previous && map.sha256 === previous.manifest.pages.map.sha256 && codex.sha256 === previous.manifest.pages.codex.sha256 && imageUnchanged) {
+      const current = await publishCurrent(output, previous.path);
       await appendFetch(output, {
         attemptedAt: identity.attemptedAt,
         captureId: identity.captureId,
@@ -397,7 +428,7 @@ export async function collect(options) {
         codexImageDigest: codexImages.digest,
         previousCaptureId: previous.captureId,
       });
-      return { status: "unchanged", captureId: identity.captureId, previousCaptureId: previous.captureId, manifest: previous.manifest, captureDirectory: previous.path, current: join(output, "current") };
+      return { status: "unchanged", captureId: identity.captureId, previousCaptureId: previous.captureId, manifest: previous.manifest, captureDirectory: previous.path, current };
     }
 
     const dateDirectory = join(output, "captures", identity.captureDate);
@@ -413,6 +444,15 @@ export async function collect(options) {
     };
     const stats = {};
     for (const page of [map, codex]) stats[page.name] = await writePage(page, captureDirectory, context);
+    const previousStructure = previous ? await readJson(join(previous.path, "codex", "structure.json"), { fragments: [] }) : null;
+    const sparse = await writeSparseCodex({
+      fragmented: { structure: stats.codex.structure, files: stats.codex.fragmentedFiles },
+      captureDirectory,
+      outputRoot: output,
+      previous: previous ? { ...previous, structure: previousStructure } : null,
+      dependencies: { imageDigest: codexImages.digest, mapHash: map.sha256 },
+    });
+    stats.codex.writtenFragments = sparse.written.length;
 
     const manifest = {
       schemaVersion: 2,
@@ -444,7 +484,6 @@ export async function collect(options) {
       }])),
       artifacts: {
         codexFragments: stats.codex.fragmentCount,
-        codexAggregates: stats.codex.aggregateCount,
         codexLeaves: stats.codex.leafCount,
         oversizedTables: stats.codex.oversizedTables,
         splitTables: stats.codex.splitTables,
@@ -465,11 +504,13 @@ export async function collect(options) {
     };
     const diff = await writeDiff(captureDirectory, manifest, stats, previous);
     await writeJson(join(captureDirectory, "manifest.json"), manifest);
-    const current = join(output, "current");
-    await rm(current, { recursive: true, force: true });
-    await cp(captureDirectory, current, { recursive: true });
-    const storage = await deduplicateVault(output);
-    await writeJson(join(output, "storage.json"), { ...storage, deduplicatedAt: new Date().toISOString() });
+    let current;
+    try {
+      current = await publishCurrent(output, captureDirectory);
+    } catch (error) {
+      await rm(join(captureDirectory, "manifest.json"), { force: true });
+      throw error;
+    }
     await appendFetch(output, {
       attemptedAt: identity.attemptedAt,
       captureId: identity.captureId,
@@ -478,7 +519,7 @@ export async function collect(options) {
       codexSha256: codex.sha256,
       previousCaptureId: previous?.captureId || null,
     });
-    return { status: "captured", captureId: identity.captureId, previousCaptureId: previous?.captureId || null, manifest, captureDirectory, current, stats, diff, storage };
+    return { status: "captured", captureId: identity.captureId, previousCaptureId: previous?.captureId || null, manifest, captureDirectory, current, stats, diff };
   } catch (error) {
     try {
       await appendFetch(output, {

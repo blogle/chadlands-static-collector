@@ -51,13 +51,14 @@ artifacts/
 │           ├── map/
 │           └── diff/
 ├── current/
-├── storage.json
 └── fetches.jsonl
 ```
 
-`current/` is a copy of the latest successful capture. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`.
+Capture directories are immutable after publication. Capture discovery scans version-2 manifests and ignores incomplete or invalid directories; it does not rely on `current/`. A later collection never rewrites an earlier capture.
 
-After each successful capture, byte-identical files across captures and `current/` are hard-linked. This preserves every vault path and its exact bytes while sharing the underlying storage; `storage.json` records the files and bytes saved.
+Historical Codex captures are sparse. Their `document.md` is the human-facing composite, and their `fragments/` directory contains only fragments first materialized or changed in that capture. Composite and parent-fragment transclusions point directly to the most recent materialized fragment; no inheritance stubs or pointer chains are created.
+
+`current/` is a separately generated, fully materialized view of the latest logical capture. It contains every current Codex fragment and a local composite `document.md`, allowing Markdown Vault to index fragment content without expanding cross-capture transclusions.
 
 When present, the map page's embedded `mapdata.underdark` payload is extracted automatically into `map/underdark/`, including its base64 PNG, layer metadata, dots, normalized records, and Markdown note. No second endpoint or flag is required.
 
@@ -65,7 +66,7 @@ Every attempt appends a compact `captured`, `unchanged`, or `failed` event to `f
 
 ## Capture Artifacts
 
-Both source directories retain the original `raw.html`, `document.md`, `document.txt`, `document.json`, and inline `scripts/` artifacts. `raw.html` contains the exact response bytes. Script hashes and byte lengths describe original inline source even when a saved JavaScript copy is formatted.
+Both source directories retain `raw.html`, `document.json`, and inline `scripts/` artifacts. `raw.html` contains the exact response bytes. Script hashes and byte lengths describe original inline source even when a saved JavaScript copy is formatted. Map output also keeps its inspection `document.md` and visible-text `document.txt`. Codex `document.md` is the composite described below; Codex does not duplicate the source as `document.txt`.
 
 Each `diff/` contains:
 
@@ -78,19 +79,18 @@ map-structure.json
 raw-hashes.json
 ```
 
-The first capture explicitly records that no previous capture exists. Later captures include a normalized codex Markdown patch plus structural added, removed, changed, moved, and metadata comparisons. Diff statements describe direct textual or structural observations only.
+The first capture explicitly records that no previous capture exists. Later captures include a visible-text patch plus structural added, removed, changed, moved, and metadata comparisons. Diff statements describe direct textual or structural observations only.
 
 ## Codex Fragments
 
-Codex output preserves the aggregate document and adds:
+Codex output is:
 
 ```text
 codex/
-├── aggregate.md
+├── document.md
 ├── structure.json
 └── fragments/
-    ├── 001-overview.md
-    └── ...
+    └── <new-or-changed fragments only>
 ```
 
 The generic fragmentation pass walks ordered DOM blocks, builds heading ancestry, and splits oversized sections at atomic paragraph/list boundaries. Unheaded preamble is retained in a deterministic catch-all fragment. Logical fragment IDs derive from normalized heading ancestry and duplicate occurrence, independently of numeric ordering prefixes.
@@ -103,13 +103,13 @@ Oversized ordered and unordered lists are split between complete top-level items
 
 List-chunk IDs include the parent, source list occurrence, and one-based top-level item range, for example `glossary__list-1__items-1-38`. Parent fragments transclude chunks in source order. Frontmatter and `structure.json` include list type/index, item and source-block ranges, rendered hashes, item-only structural hashes, hierarchy, and conservation counters. Earlier chunk boundaries normally remain unchanged when items are appended.
 
-`aggregate.md` and aggregate fragments use relative Obsidian-compatible transclusions such as:
+`document.md` and parent fragments use relative Obsidian-compatible transclusions such as:
 
 ```markdown
 ![[fragments/001-overview.md]]
 ```
 
-These generated transclusion files are output artifacts, not vault configuration. `structure.json` records stable IDs, hierarchy, source order, block ranges, sizes, and content hashes for retrieval and diffing.
+These generated transclusion files are output artifacts, not vault configuration. `structure.json` records the complete logical document: stable IDs, hierarchy, source order, block ranges, content hashes, render signatures, and the exact capture/path where each fragment is physically materialized. A fragment is written again when its own content or metadata changes, when ordered child membership changes, or when a child moves to a new materialized version. This rewrites only the affected ancestor path while unchanged subtrees continue to reference their immutable origin directly.
 
 ## Normalized Map
 

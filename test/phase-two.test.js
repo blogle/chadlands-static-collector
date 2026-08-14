@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { collect } from "../src/cli.js";
+import { materializeCurrentCodex } from "../src/codex.js";
 import { fragmentCodex } from "../src/fragments.js";
 import { discoverPreviousCapture, discoverSuccessfulCaptures } from "../src/history.js";
 import { diffMaps, normalizeMap } from "../src/map.js";
-import { deduplicateVault } from "../src/storage.js";
 
 const mapCandidate = JSON.parse(await readFile(new URL("./fixtures/map-candidate.json", import.meta.url), "utf8"));
 
@@ -35,7 +35,6 @@ test("fragments headings, preserves catch-all content, and emits transclusions",
   assert.ok(ids.includes("overview"));
   assert.ok(ids.includes("overview__details"));
   assert.match(Object.values(result.files).join("\n"), /Introductory text without a heading/);
-  assert.match(result.aggregate, /!\[\[fragments\/\d{3}-preamble\.md\]\]/);
   assert.match(Object.values(result.files).join("\n"), /!\[\[\d{3}-details\.md\]\]/);
 });
 
@@ -73,21 +72,6 @@ test("normalizes observed map records without dropping unknown fields", () => {
   assert.equal(normalized.validation.omittedSourceRecords, 0);
 });
 
-test("deduplicates identical vault files without changing their paths", async () => {
-  const output = await mkdtemp(join(tmpdir(), "collector-dedupe-"));
-  const first = join(output, "captures", "one.txt");
-  const second = join(output, "current", "two.txt");
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir(join(output, "captures"), { recursive: true });
-  await mkdir(join(output, "current"), { recursive: true });
-  await writeFile(first, "same content\n");
-  await writeFile(second, "same content\n");
-  const result = await deduplicateVault(output);
-  assert.equal(result.deduplicatedFiles, 1);
-  assert.equal((await stat(first)).ino, (await stat(second)).ino);
-  assert.equal(await readFile(second, "utf8"), "same content\n");
-});
-
 test("map IDs are stable across movement and movement is reported", () => {
   const movedCandidate = structuredClone(mapCandidate);
   movedCandidate.settlements[0].x += 20;
@@ -101,6 +85,18 @@ test("map IDs are stable across movement and movement is reported", () => {
     before: { x: 420, y: 240 },
     after: { x: 440, y: 244 },
   });
+});
+
+test("rejects inherited fragment paths outside the output root", async () => {
+  const output = await mkdtemp(join(tmpdir(), "collector-inheritance-boundary-"));
+  const source = join(output, "captures", "2026-01-01", "capture");
+  const current = join(output, "current");
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(join(source, "codex", "fragments"), { recursive: true });
+  await mkdir(join(current, "codex", "fragments"), { recursive: true });
+  const record = { id: "section", kind: "leaf", contentHash: "hash", file: "fragments/001-section.md", materializedPath: "/etc/passwd", materializedHash: "hash" };
+  await writeFile(join(source, "codex", "structure.json"), `${JSON.stringify({ captureId: "capture", captureDate: "2026-01-01", title: "Codex", fragments: [record] })}\n`);
+  await assert.rejects(materializeCurrentCodex(current, source, output), /Invalid materialized fragment path/);
 });
 
 test("creates dated captures, discovers history, suppresses unchanged copies, and writes changed diffs", async (context) => {
@@ -118,6 +114,21 @@ test("creates dated captures, discovers history, suppresses unchanged copies, an
   assert.equal(first.captureId, "2026-07-25T17-30-00Z");
   assert.equal(first.captureDirectory, join(output, "captures", "2026-07-25", first.captureId));
   assert.match(await readFile(join(first.captureDirectory, "diff", "summary.md"), "utf8"), /No previous successful capture/);
+  const firstStructure = JSON.parse(await readFile(join(first.captureDirectory, "codex", "structure.json"), "utf8"));
+  const firstFragmentFiles = (await readdir(join(first.captureDirectory, "codex", "fragments"))).filter((name) => name.endsWith(".md"));
+  assert.equal(firstFragmentFiles.length, firstStructure.fragments.length, "the first capture materializes every fragment");
+  const firstRaw = join(first.captureDirectory, "codex", "raw.html");
+  const firstRawBefore = await readFile(firstRaw);
+  const firstRawMtime = (await stat(firstRaw)).mtimeMs;
+  const legacyStructure = structuredClone(firstStructure);
+  for (const record of legacyStructure.fragments) {
+    delete record.materializedCapture;
+    delete record.materializedPath;
+    delete record.materializedHash;
+    delete record.renderSignature;
+    delete record.dependencyHash;
+  }
+  await writeFile(join(first.captureDirectory, "codex", "structure.json"), `${JSON.stringify(legacyStructure, null, 2)}\n`);
 
   const incomplete = join(output, "captures", "2026-07-25", "2026-07-25T18-00-00Z");
   await (await import("node:fs/promises")).mkdir(incomplete);
@@ -141,10 +152,40 @@ test("creates dated captures, discovers history, suppresses unchanged copies, an
 
   for (const relative of [
     "manifest.json", "diff/summary.md", "diff/manifest.json", "diff/codex-text.patch", "diff/codex-structure.json",
-    "diff/map-structure.json", "diff/raw-hashes.json", "codex/aggregate.md", "codex/structure.json",
+    "diff/map-structure.json", "diff/raw-hashes.json", "codex/document.md", "codex/structure.json",
     "map/source-candidate.json", "map/normalized.json", "map/map.md", "map/markers.json", "map/settlements.json",
     "map/labels.json", "map/unclassified.json", "map/validation.json", "map/annotated.svg", "map/annotated.png", "map/legend.json",
   ]) assert.ok((await stat(join(third.current, relative))).isFile(), `${relative} should exist`);
   assert.ok((await readdir(join(third.current, "codex", "fragments"))).length > 0);
   assert.equal(JSON.parse(await readFile(join(third.current, "manifest.json"), "utf8")).artifacts.splitLists, 1);
+  const thirdStructure = JSON.parse(await readFile(join(third.captureDirectory, "codex", "structure.json"), "utf8"));
+  const inherited = thirdStructure.fragments.find(({ id }) => id.startsWith("overview__entries__list-1"));
+  assert.ok(inherited, "an unchanged list fragment should remain in the logical structure");
+  assert.equal(inherited.materializedCapture, first.captureId);
+  await assert.rejects(stat(join(third.captureDirectory, "codex", inherited.file)), { code: "ENOENT" });
+  const changedOverview = thirdStructure.fragments.find(({ id }) => id === "overview");
+  assert.ok(changedOverview, "the changed aggregate should exist");
+  assert.equal(changedOverview.materializedCapture, third.captureId, "a changed ancestor is rewritten locally");
+  const changedOverviewText = await readFile(join(third.captureDirectory, "codex", changedOverview.file), "utf8");
+  assert.match(changedOverviewText, new RegExp(first.captureId), "changed ancestors point directly to unchanged historical children");
+  assert.ok((await stat(join(third.current, "codex", inherited.file))).isFile(), "current materializes inherited fragments for RAG");
+  const currentDocument = await readFile(join(third.current, "codex", "document.md"), "utf8");
+  assert.match(currentDocument, /!\[\[fragments\//);
+  assert.doesNotMatch(currentDocument, /captures\//, "current composite references only local materialized fragments");
+  const currentFragments = (await readdir(join(third.current, "codex", "fragments"))).filter((name) => name.endsWith(".md"));
+  assert.equal(currentFragments.length, thirdStructure.fragments.length);
+  await assert.rejects(stat(join(third.captureDirectory, "codex", "aggregate.md")), { code: "ENOENT" });
+  await assert.rejects(stat(join(third.captureDirectory, "codex", "document.txt")), { code: "ENOENT" });
+  assert.equal(await readFile(join(third.captureDirectory, "codex", "raw.html"), "utf8"), fixture.state.codex);
+  assert.deepEqual(await readFile(firstRaw), firstRawBefore, "later collection does not alter prior raw evidence");
+  assert.equal((await stat(firstRaw)).mtimeMs, firstRawMtime, "later collection does not touch prior capture mtimes");
+
+  fixture.state.codex = page("Guide", `<h1>Overview</h1><p>Third version.</p>${largeList}<h2>Appendix</h2><p>Newer material.</p>`);
+  const fourth = await collect({ ...options, now: "2026-07-27T08:00:00.000Z" });
+  const fourthStructure = JSON.parse(await readFile(join(fourth.captureDirectory, "codex", "structure.json"), "utf8"));
+  const inheritedAgain = fourthStructure.fragments.find(({ id }) => id === inherited.id);
+  assert.equal(inheritedAgain.materializedCapture, first.captureId, "unchanged content points directly to its original materialized capture");
+  await assert.rejects(stat(join(fourth.captureDirectory, "codex", inheritedAgain.file)), { code: "ENOENT" });
+  const localFiles = (await readdir(join(fourth.captureDirectory, "codex", "fragments"))).filter((name) => name.endsWith(".md"));
+  assert.ok(localFiles.length < fourthStructure.fragments.length, "later captures store only changed/new fragments");
 });

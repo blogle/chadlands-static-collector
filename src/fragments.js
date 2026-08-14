@@ -176,12 +176,6 @@ function structureNodes(structure) {
   return structure?.fragments || structure?.nodes || [];
 }
 
-export function buildAggregate(records, { captureId, captureDate, title = "Codex" } = {}) {
-  const roots = records.filter((record) => record.parentId === null && !record.partOf);
-  const header = frontmatter({ id: "codex", sourceOrder: 0, headingPath: [], contentHash: sha256(title) }, captureId, captureDate);
-  return `${header}# ${title}\n\n${roots.map((record) => `![[fragments/${record.file.split("/").at(-1)}]]`).join("\n\n")}\n`;
-}
-
 export function fragmentCodex(html, options = {}) {
   const {
     captureId = null,
@@ -376,10 +370,8 @@ export function fragmentCodex(html, options = {}) {
     const children = record.childIds.map((id) => byId.get(id));
     const body = [record.heading ? `${"#".repeat(Math.max(1, Math.min(6, record.headingLevel)))} ${record.heading}` : "", record.directContent, ...children.map((child) => `![[${child.file.split("/").at(-1)}]]`)].filter(Boolean).join("\n\n");
     files[record.file] = `${frontmatter(record, captureId, captureDate)}${body}\n`;
-    delete record.directContent;
   }
   const title = clean($("title").first().text()) || root.children[0]?.heading || "Codex";
-  const aggregate = buildAggregate(records, { captureId, captureDate, title });
   const structure = {
     captureId,
     captureDate,
@@ -403,7 +395,7 @@ export function fragmentCodex(html, options = {}) {
     },
     fragments: records,
   };
-  return { files, aggregate, structure };
+  return { files, structure };
 }
 
 export function diffCodexStructures(current, previous) {

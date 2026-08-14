@@ -87,13 +87,15 @@ test("writes the expected capture and current artifact structure", async (contex
   for (const relative of [
     "manifest.json", "map/raw.html", "map/document.md", "map/document.txt", "map/document.json",
     "map/scripts/index.json", "map/json-candidates/index.json", "codex/raw.html", "codex/document.md",
-    "codex/document.txt", "codex/document.json", "codex/scripts/index.json",
+    "codex/document.json", "codex/structure.json", "codex/scripts/index.json",
   ]) {
     assert.ok((await stat(join(result.current, relative))).isFile(), `${relative} should exist`);
   }
   const manifest = JSON.parse(await readFile(join(result.current, "manifest.json"), "utf8"));
   assert.equal(manifest.pages.map.status, 200);
   assert.match(manifest.pages.codex.sha256, /^[a-f0-9]{64}$/);
+  await assert.rejects(stat(join(result.current, "codex/document.txt")), { code: "ENOENT" });
+  await assert.rejects(stat(join(result.current, "codex/aggregate.md")), { code: "ENOENT" });
 });
 
 test("materializes Codex images and rewrites references at both depths", async (context) => {
@@ -115,9 +117,7 @@ test("materializes Codex images and rewrites references at both depths", async (
   assert.deepEqual(await readFile(imageFile), ONE_PNG, "materialized bytes must match the fetched PNG");
 
   const documentMd = await readFile(join(result.current, "codex/document.md"), "utf8");
-  assert.match(documentMd, /images\/001\.jpg/, "document.md references the local image at codex depth");
-  assert.match(documentMd, /\]\(\.\.\/map\/map\.md\)/, "document.md rewrites the living-map link to the collected map note");
-  assert.doesNotMatch(documentMd, /\/img\/avatar\.jpg/, "no dangling source-relative image reference in document.md");
+  assert.match(documentMd, /!\[\[fragments\//, "document.md is the composite fragment entry point");
 
   const fragmentsDir = join(result.current, "codex/fragments");
   const fragmentFiles = (await readdir(fragmentsDir)).filter((name) => name.endsWith(".md")).sort();
@@ -129,6 +129,7 @@ test("materializes Codex images and rewrites references at both depths", async (
   const fragmentWithMap = fragmentBodies.find((body) => body.includes("map/map.md"));
   assert.ok(fragmentWithMap, "some fragment should reference the map note");
   assert.match(fragmentWithMap, /\]\(\.\.\/\.\.\/map\/map\.md\)/, "fragments rewrite the living-map link at fragment depth");
+  assert.doesNotMatch(fragmentBodies.join("\n"), /\/img\/avatar\.jpg/, "no dangling source-relative image reference remains");
 
   const document = JSON.parse(await readFile(join(result.current, "codex/document.json"), "utf8"));
   const avatar = document.images.find((image) => image.originalSrc === "/img/avatar.jpg");
@@ -158,8 +159,8 @@ test("non-image responses keep the absolute URL and are not materialized", async
   const imagesDir = join(result.current, "codex/images");
   await assert.rejects(stat(imagesDir), "codex/images/ should not be created when no image materializes");
 
-  const documentMd = await readFile(join(result.current, "codex/document.md"), "utf8");
-  assert.match(documentMd, /http:\/\/127\.0\.0\.1:\d+\/img\/not-an-image/, "failed image keeps the absolute upstream URL");
+  const fragmentText = (await Promise.all((await readdir(join(result.current, "codex/fragments"))).map((name) => readFile(join(result.current, "codex/fragments", name), "utf8")))).join("\n");
+  assert.match(fragmentText, /http:\/\/127\.0\.0\.1:\d+\/img\/not-an-image/, "failed image keeps the absolute upstream URL");
 
   const manifest = JSON.parse(await readFile(join(result.current, "manifest.json"), "utf8"));
   assert.equal(manifest.pages.codex.imageCount, 0);
